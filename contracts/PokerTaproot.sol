@@ -5,113 +5,142 @@ import {inEuint8, euint8, inEuint16, euint16, FHE} from "@fhenixprotocol/contrac
 import "@fhenixprotocol/contracts/access/Permissioned.sol";
 
 contract Poker is Permissioned {
-  // players
+  /////////////////
+  // Variables////
+  ////////////////
+
+  // Players
   address[] public players;
-  // current stack
+  // Current stack
   mapping(address => uint256) public currentStack;
-  // player cards
-  mapping( address => uint256) public playerCards;
-  // encrypted cards
+  // Player cards
+  mapping(address => uint256) public playerCards;
+  // Encrypted cards
   euint8[] public cards;
-  // open cards
+  // Open cards
   uint8[] public tableCards;
   bool[] public tableCardsRevealed;
-  // players still in the game
+  // Players still in the game
   mapping(address => bool) public stillPlaying;
-  // current round
+  // Current round
   uint8 public currentRound;
-  // player whose turn it is
+  // Player whose turn it is
   address public currentPlayer;
-  // current bet
+  // Current bet
   uint256 public currentBet;
-  // pot
+  // Pot
   uint256 public pot;
-uint8 public dealerIndex;
-bool public gameEnded;
-uint256 public smallBlind;
-unit256 public bigBlind;
-    uint256 public constant ACTION_TIMEOUT = 1 minutes;
-    mapping(address => uint256) public lastActionTimestamp;
+  //Position of the dealer
+  uint8 public dealerIndex;
+  // Game ended
+  bool public gameEnded;
+  // Blinds
+  uint256 public smallBlind;
+  unit256 public bigBlind;
+  // Action timeout if players dont do anything
+  uint256 public constant ACTION_TIMEOUT = 1 minutes;
+  mapping(address => uint256) public lastActionTimestamp;
+  //////////////
+  // Events/////
+  /////////////
+  event AutoCheck(address indexed player);
+  event AutoFold(address indexed player);
+  event PlayerJoined(address indexed player);
+  event PlayerLeft(address indexed player);
+  event GameStarted();
+  event RoundStarted(uint256 roundNumber);
+  event RoundEnded(uint256 roundNumber);
+  event PlayerBet(address indexed player, uint256 amount);
+  event PlayerCalled(address indexed player);
+  event PlayerChecked(address indexed player);
+  event PlayerFolded(address indexed player);
+  event PotDistributed(address indexed winner, uint256 amount);
+  event GameEnded();
 
-
-    ///events
-
-     event AutoCheck(address indexed player);
-    event AutoFold(address indexed player);
-    event PlayerJoined(address indexed player);
-    event PlayerLeft(address indexed player);
-    event GameStarted();
-    event RoundStarted(uint256 roundNumber);
-    event RoundEnded(uint256 roundNumber);
-    event PlayerBet(address indexed player, uint256 amount);
-    event PlayerCalled(address indexed player);
-    event PlayerChecked(address indexed player);
-    event PlayerFolded(address indexed player);
-    event PotDistributed(address indexed winner, uint256 amount);
-    event GameEnded();
-
+  
+  // Constructor to initialize the game state
   constructor() {
-    currentPlayer = address(0);
-    currentRound = 0;
-    currentBet = 0;
-    pot = 0;
-    gameEnded = false;
+    currentPlayer = address(0); // No current player at the start
+    currentRound = 0; // Initial round is 0
+    currentBet = 0; // No bets at the start
+    pot = 0; // Pot starts at 0
+    gameEnded = false; // Game has not ended at the start
   }
 
+  // Function to allow a player to join the game
   function joinGame() public payable {
-    require(players.length < 5, "Game is full");
-    require(!isPlayer(msg.sender), "You are already in the game");
+    require(players.length < 5, "Game is full"); // Maximum of 5 players allowed
+    require(!isPlayer(msg.sender), "You are already in the game"); // Player should not already be in the game
     require(
       msg.value == 0.0000001 ether,
       "You need to pay 1 ether to join the game"
-    );
+    ); // Player must pay 1 ether to join
 
-    players.push(msg.sender);
-    currentStack[msg.sender] = msg.value * 10000;
-    stillPlaying[msg.sender] = true;
+    players.push(msg.sender); // Add player to the list
+    currentStack[msg.sender] = msg.value * 10000; // Initialize player's stack
+    stillPlaying[msg.sender] = true; // Mark player as still playing
 
-    emit PlayerJoined(msg.sender);
+    emit PlayerJoined(msg.sender); // Emit event for player joining
   }
-     function setBlindValues(uint256 _smallBlind, uint256 _bigBlind) public onlyOwner {
-        smallBlind = _smallBlind;
-        bigBlind = _bigBlind;
-    }
+
+  // Function to set the values of small and big blinds
+  function setBlindValues(uint256 _smallBlind, uint256 _bigBlind) public onlyOwner {
+    smallBlind = _smallBlind; // Set the small blind value
+    bigBlind = _bigBlind; // Set the big blind value
+  }
 
 function setBlinds(uint256 smallBlind, uint256 bigBlind) internal {
+    // Ensure there are at least 2 players to set blinds
     require(players.length >= 2, "Not enough players to set blinds");
-    
+    // Calculate the indices for small and big blinds
     uint8 smallBlindIndex = (dealerIndex + 1) % uint8(players.length);
     uint8 bigBlindIndex = (dealerIndex + 2) % uint8(players.length);
-    
-    // Small blind
+
+    // Find the next active player for small blind
+    while (!stillPlaying[players[smallBlindIndex]]) {
+        smallBlindIndex = (smallBlindIndex + 1) % uint8(players.length);
+    }
+
+    // Find the next active player for big blind
+    while (!stillPlaying[players[bigBlindIndex]]) {
+        bigBlindIndex = (bigBlindIndex + 1) % uint8(players.length);
+    }
+
+    // Handle small blind
     if (currentStack[players[smallBlindIndex]] >= smallBlind) {
+        // Deduct small blind from player's stack and add to pot
         currentStack[players[smallBlindIndex]] -= smallBlind;
         pot += smallBlind;
     } else {
-        // All-in for small blind
+        // If player cannot cover small blind, go all-in
         pot += currentStack[players[smallBlindIndex]];
         currentStack[players[smallBlindIndex]] = 0;
     }
-    
-    // Big blind
+
+    // Handle big blind
     if (currentStack[players[bigBlindIndex]] >= bigBlind) {
+        // Deduct big blind from player's stack and add to pot
         currentStack[players[bigBlindIndex]] -= bigBlind;
         pot += bigBlind;
         currentBet = bigBlind;
     } else {
-        // All-in for big blind
+        // If player cannot cover big blind, go all-in
         pot += currentStack[players[bigBlindIndex]];
         currentBet = currentStack[players[bigBlindIndex]];
         currentStack[players[bigBlindIndex]] = 0;
     }
-    
-    currentPlayer = players[(dealerIndex + 3) % players.length];
+
+    // Set the current player to the one after the big blind
+    currentPlayer = players[(bigBlindIndex + 1) % players.length];
 }
 
 function removePlayer(address player) internal {
+    // Loop through the players to find the one to remove
     for (uint256 i = 0; i < players.length; i++) {
         if (players[i] == player) {
+            // Replace the player to be removed with the last player in the list
             players[i] = players[players.length - 1];
+            // Remove the last player from the list
             players.pop();
             break;
         }
@@ -119,116 +148,111 @@ function removePlayer(address player) internal {
 }
 
 function startGame() public {
-    require(isPlayer(msg.sender), "You are not in the game");
-    require(players.length > 1, "Not enough players to start the game");
-    require(cards.length == 0, "Game already started");
-    require(playerIndex(msg.sender) == 0, "Only the first player can start the game");
+    require(isPlayer(msg.sender), "You are not in the game"); // Ensure the caller is a player
+    require(players.length > 1, "Not enough players to start the game"); // Ensure there are enough players
+    require(cards.length == 0, "Game already started"); // Ensure the game hasn't started
+    require(playerIndex(msg.sender) == 0, "Only the first player can start the game"); // Ensure the first player starts the game
 
-    dealerIndex = 0; // Inicializar el dealer
-    deal();
-    setBlinds(smallBlind, bigBlind);
-    currentPlayer = players[(dealerIndex + 3) % players.length];
-    emit GameStarted();
+    dealerIndex = 0; // Initialize the dealer
+    deal(); // Deal the cards
+    setBlinds(smallBlind, bigBlind); // Set the blinds
+    currentPlayer = players[(dealerIndex + 3) % players.length]; // Set the current player
+    emit GameStarted(); // Emit the game started event
 }
 
-  function check() public {
-    require(isPlayer(msg.sender), "You are not in the game");
-    require(stillPlaying[msg.sender], "You are not in the game");
-    require(currentPlayer == msg.sender, "It's not your turn");
-    require(currentBet == 0, "You cannot check, there is a bet");
-    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout");
+function check() public {
+    require(isPlayer(msg.sender), "You are not in the game"); // Ensure the caller is a player
+    require(stillPlaying[msg.sender], "You are not in the game"); // Ensure the player is still playing
+    require(currentPlayer == msg.sender, "It's not your turn"); // Ensure it's the player's turn
+    require(currentBet == 0, "You cannot check, there is a bet"); // Ensure there is no bet to check
+    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout"); // Ensure the action is within the timeout
 
-    lastActionTimestamp[msg.sender] = block.timestamp;
+    lastActionTimestamp[msg.sender] = block.timestamp; // Update the last action timestamp
 
-    uint8 index = (playerIndex(msg.sender) + 1) % uint8(players.length);
-    currentPlayer = players[index];
-        advanceTurn();
-    if (playerIndex(currentPlayer) == 0) {
-        currentBet = 0;
+    uint8 index = (playerIndex(msg.sender) + 1) % uint8(players.length); // Calculate the next player index
+    currentPlayer = players[index]; // Set the current player
+    advanceTurn(); // Advance the turn
+    if (playerIndex(currentPlayer) == 0) { // If it's the first player's turn
+        currentBet = 0; // Reset the current bet
         if (currentRound == 0) {
-            revealOnTable(0, 3);
+            revealOnTable(0, 3); // Reveal the first three cards
         } else if (currentRound == 1) {
-            revealOnTable(3, 4);
+            revealOnTable(3, 4); // Reveal the fourth card
         } else if (currentRound == 2) {
-            revealOnTable(4, 5);
+            revealOnTable(4, 5); // Reveal the fifth card
         } else if (currentRound == 3) {
-            address[] memory tmp = determineWinners();
-            distributePot(tmp);
+            address[] memory tmp = determineWinners(); // Determine the winners
+            distributePot(tmp); // Distribute the pot
         }
-        currentRound++;
-        emit PlayerChecked(msg.sender);
+        currentRound++; // Advance the round
+        emit PlayerChecked(msg.sender); // Emit the player checked event
     }
 }
-
 function leaveGame() public {
-    require(isPlayer(msg.sender), "You are not in the game");
-    require(!stillPlaying[msg.sender], "You cannot leave while still playing a hand");
+    require(isPlayer(msg.sender), "You are not in the game"); // Ensure the caller is a player
+    require(!stillPlaying[msg.sender], "You cannot leave while still playing a hand"); // Ensure the player is not still playing a hand
 
-    uint256 amount = currentStack[msg.sender];
-    currentStack[msg.sender] = 0;
-    removePlayer(msg.sender);
+    uint256 amount = currentStack[msg.sender]; // Get the player's current stack
+    currentStack[msg.sender] = 0; // Reset the player's stack
+    removePlayer(msg.sender); // Remove the player from the game
 
-    payable(msg.sender).transfer(amount);
+    payable(msg.sender).transfer(amount); // Transfer the player's stack amount to their address
 
-    // Si el jugador que se retira es el jugador actual, avanzar al siguiente jugador
+    // If the player leaving is the current player, advance to the next player
     if (currentPlayer == msg.sender) {
         advanceTurn();
     }
 
-    // Si no hay suficientes jugadores para continuar, terminar el juego
+    // If there are not enough players to continue, end the game
     if (players.length < 2) {
         gameEnded = true;
     }
-    emit PlayerLeft(msg.sender);
+    emit PlayerLeft(msg.sender); // Emit the player left event
 }
 
 function call() public {
-    require(isPlayer(msg.sender), "You are not in the game");
-    require(stillPlaying[msg.sender], "You are not in the game");
-    require(currentPlayer == msg.sender, "It's not your turn");
-    require(currentBet > 0, "There is no bet to call");
-    require(currentStack[msg.sender] >= currentBet, "You don't have enough money to call");
-    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout");
-    lastActionTimestamp[msg.sender] = block.timestamp;
+    require(isPlayer(msg.sender), "You are not in the game"); // Ensure the caller is a player
+    require(stillPlaying[msg.sender], "You are not in the game"); // Ensure the player is still playing
+    require(currentPlayer == msg.sender, "It's not your turn"); // Ensure it's the player's turn
+    require(currentBet > 0, "There is no bet to call"); // Ensure there is a bet to call
+    require(currentStack[msg.sender] >= currentBet, "You don't have enough money to call"); // Ensure the player has enough money to call
+    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout"); // Ensure the action is within the timeout
+    lastActionTimestamp[msg.sender] = block.timestamp; // Update the last action timestamp
 
-    currentStack[msg.sender] -= currentBet;
-    pot += currentBet;
+    currentStack[msg.sender] -= currentBet; // Deduct the current bet from the player's stack
+    pot += currentBet; // Add the current bet to the pot
 
-    uint8 index = (playerIndex(msg.sender) + 1) % uint8(players.length);
-    currentPlayer = players[index];
-        advanceTurn();
-    if (playerIndex(currentPlayer) == 0) {
-        currentBet = 0;
+    uint8 index = (playerIndex(msg.sender) + 1) % uint8(players.length); // Calculate the next player index
+    currentPlayer = players[index]; // Set the current player
+    advanceTurn(); // Advance the turn
+    if (playerIndex(currentPlayer) == 0) { // If it's the first player's turn
+        currentBet = 0; // Reset the current bet
         if (currentRound == 0) {
-            revealOnTable(0, 3);
+            revealOnTable(0, 3); // Reveal the first three cards
         } else if (currentRound == 1) {
-            revealOnTable(3, 4);
+            revealOnTable(3, 4); // Reveal the fourth card
         } else if (currentRound == 2) {
-            revealOnTable(4, 5);
+            revealOnTable(4, 5); // Reveal the fifth card
         } else if (currentRound == 3) {
-            address[] memory tmp = determineWinners();
-            distributePot(tmp);
+            address[] memory tmp = determineWinners(); // Determine the winners
+            distributePot(tmp); // Distribute the pot
         }
-        currentRound++;
-        emit PlayerCalled(msg.sender);
+        currentRound++; // Advance the round
+        emit PlayerCalled(msg.sender); // Emit the player called event
     }
-}
-function advanceTurn() internal {
-    uint8 index = (playerIndex(currentPlayer) + 1) % uint8(players.length);
-    currentPlayer = players[index];
 }
 
 function endRound() internal {
-    // Eliminar jugadores con stack 0
+    // Remove players with a stack of 0
     for (uint256 i = 0; i < players.length; i++) {
         if (currentStack[players[i]] == 0) {
             removePlayer(players[i]);
-            i--; // Ajustar el índice después de eliminar un elemento
+            i--; // Adjust the index after removing an element
         }
     }
 
-       if (players.length < 2) {
-        // Terminar el juego y otorgar el bote al último jugador con fichas
+    if (players.length < 2) {
+        // End the game and award the pot to the last player with chips
         if (players.length == 1) {
             currentStack[players[0]] += pot;
             pot = 0;
@@ -238,12 +262,12 @@ function endRound() internal {
         return;
     }
 
+    // Update the dealer index
     dealerIndex = (dealerIndex + 1) % uint8(players.length);
-    setBlinds(0.00000005 ether, 0.0000001 ether);
     currentPlayer = players[(dealerIndex + 3) % players.length];
     currentRound = 0;
 
-    // Reiniciar las variables para la nueva ronda
+    // Reset variables for the new round
     for (uint8 i = 0; i < players.length; i++) {
         stillPlaying[players[i]] = true;
     }
@@ -276,20 +300,20 @@ function bet(uint256 amount) public {
     if (playerIndex(currentPlayer) == 0) {
         currentBet = 0;
         if (currentRound == 0) {
-            revealOnTable(0, 3);
+            revealOnTable(0, 3); // Reveal the first three cards
         } else if (currentRound == 1) {
-            revealOnTable(3, 4);
+            revealOnTable(3, 4); // Reveal the fourth card
         } else if (currentRound == 2) {
-            revealOnTable(4, 5);
+            revealOnTable(4, 5); // Reveal the fifth card
         } else if (currentRound == 3) {
-            address[] memory tmp = determineWinners();
-            distributePot(tmp);
+            address[] memory tmp = determineWinners(); // Determine the winners
+            distributePot(tmp); // Distribute the pot
         }
         currentRound++;
-        emit PlayerBet(msg.sender, betAmount);
+        emit PlayerBet(msg.sender, betAmount); // Emit the player bet event
     }
 
-    // Verificar si sólo queda un jugador con fichas
+    // Check if only one player has chips left
     uint256 playersWithChips = 0;
     address lastPlayerWithChips;
     for (uint256 i = 0; i < players.length; i++) {
@@ -300,7 +324,7 @@ function bet(uint256 amount) public {
     }
 
     if (playersWithChips == 1) {
-        // Terminar la mano y otorgar el bote al último jugador con fichas
+        // End the hand and award the pot to the last player with chips
         currentStack[lastPlayerWithChips] += pot;
         pot = 0;
         endRound();
@@ -308,105 +332,105 @@ function bet(uint256 amount) public {
     }
 }
 
-    function advanceTurn() internal {
-        uint8 index = (playerIndex(currentPlayer) + 1) % uint8(players.length);
-        address nextPlayer = players[index];
+function advanceTurn() internal {
+    uint8 index = (playerIndex(currentPlayer) + 1) % uint8(players.length);
+    address nextPlayer = players[index];
 
-        if (block.timestamp > lastActionTimestamp[currentPlayer] + ACTION_TIMEOUT) {
-            // El jugador actual no realizó una acción dentro del tiempo límite
-            if (currentBet == 0) {
-                // No hay apuesta actual, realizar un "check" automático
-                lastActionTimestamp[currentPlayer] = block.timestamp;
-                emit AutoCheck(currentPlayer);
-            } else {
-                // Hay una apuesta, realizar un "fold" automático
-                stillPlaying[currentPlayer] = false;
-                emit AutoFold(currentPlayer);
-            }
+    if (block.timestamp > lastActionTimestamp[currentPlayer] + ACTION_TIMEOUT) {
+        // The current player did not act within the time limit
+        if (currentBet == 0) {
+            // No current bet, perform an automatic "check"
+            check();
+            emit AutoCheck(currentPlayer); // Emit the auto check event
+        } else {
+            // There is a bet, perform an automatic "fold"
+            fold();
+            emit AutoFold(currentPlayer); // Emit the auto fold event
         }
-
-        currentPlayer = nextPlayer;
     }
 
-    event AutoCheck(address indexed player);
-    event AutoFold(address indexed player);
+    currentPlayer = nextPlayer;
 }
 
-  function fold() public {
-    require(isPlayer(msg.sender), "You are not in the game");
-    require(stillPlaying[msg.sender], "You are not in the game");
-    require(currentPlayer == msg.sender, "It's not your turn");
-    require(currentRound < 4, "Game is over");
-    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout");
-    lastActionTimestamp[msg.sender] = block.timestamp;
+event AutoCheck(address indexed player);
+event AutoFold(address indexed player);
+}
 
-    stillPlaying[msg.sender] = false;
+function fold() public {
+    require(isPlayer(msg.sender), "You are not in the game"); // Ensure the sender is a player
+    require(stillPlaying[msg.sender], "You are not in the game"); // Ensure the player is still in the game
+    require(currentPlayer == msg.sender, "It's not your turn"); // Ensure it's the player's turn
+    require(currentRound < 4, "Game is over"); // Ensure the game is not over
+    require(block.timestamp <= lastActionTimestamp[msg.sender] + ACTION_TIMEOUT, "Action timeout"); // Ensure the action is within the timeout period
+    lastActionTimestamp[msg.sender] = block.timestamp; // Update the last action timestamp
 
-    advanceTurn();
+    stillPlaying[msg.sender] = false; // Mark the player as no longer playing
+
+    advanceTurn(); // Advance to the next player's turn
     if (playerIndex(currentPlayer) == 0) {
-      currentBet = 0;
-      if (currentRound == 0) {
-        revealOnTable(0, 3);
-      } else if (currentRound == 1) {
-        revealOnTable(3, 4);
-      } else if (currentRound == 2) {
-        revealOnTable(4, 5);
-      } else if (currentRound == 3) {
-        address[] memory tmp = determineWinners();
-        distributePot(tmp);
-      }
-      currentRound++;
-      emit PlayerFolded(msg.sender);
+        currentBet = 0; // Reset the current bet
+        if (currentRound == 0) {
+            revealOnTable(0, 3); // Reveal the first three cards
+        } else if (currentRound == 1) {
+            revealOnTable(3, 4); // Reveal the fourth card
+        } else if (currentRound == 2) {
+            revealOnTable(4, 5); // Reveal the fifth card
+        } else if (currentRound == 3) {
+            address[] memory tmp = determineWinners(); // Determine the winners
+            distributePot(tmp); // Distribute the pot
+        }
+        currentRound++; // Move to the next round
+        emit PlayerFolded(msg.sender); // Emit the player folded event
     }
-  }
+}
 
-  function deal() internal {
-    require(players.length > 1, "Not enough players to start the game");
-    require(cards.length == 0, "Game already started");
+function deal() internal {
+    require(players.length > 1, "Not enough players to start the game"); // Ensure there are enough players
+    require(cards.length == 0, "Game already started"); // Ensure the game has not already started
 
-    // create a new deck of cards
+    // Create a new deck of cards
     cards = new euint8[](players.length * 2 + 5);
     tableCards = new uint8[](players.length * 2 + 5);
     tableCardsRevealed = new bool[](players.length * 2 + 5);
 
-     for (uint8 i = 0; i < players.length; i++) {
-    playerCards[players[i]] = i * 2;
-  }
-
-    for (uint8 i = 0; i < cards.length; ) {
-      euint8 color = RandomMock.getFakeRandomU8();
-      euint8 value = RandomMock.getFakeRandomU8();
-      euint8 card = FHE.or(
-        FHE.and(color, FHE.asEuint8(0x30)),
-        FHE.and(value, FHE.asEuint8(0xf))
-      );
-
-      // sanity check value below 13
-      card = FHE.select(
-        FHE.lt(FHE.and(card, FHE.asEuint8(0xf)), FHE.asEuint8(13)),
-        card,
-        FHE.asEuint8(0xff)
-      );
-      // check if card exists, else "continue"
-      for (uint8 j = 0; j < i; j++) {
-        card = FHE.select(FHE.eq(cards[j], card), card, FHE.asEuint8(0xff));
-      }
-
-      cards[i] = card;
-      euint8 e_i = FHE.select(
-        FHE.ne(card, FHE.asEuint8(0xff)),
-        FHE.asEuint8(i + 1),
-        FHE.asEuint8(i)
-      );
-      i = FHE.decrypt(e_i);
-
-      if (i >= (players.length * 2 + 5)) break;
+    for (uint8 i = 0; i < players.length; i++) {
+        playerCards[players[i]] = i * 2; // Assign two cards to each player
     }
-  }
 
-  function revealOwnCards(
-    Permission calldata perm
-  ) public view onlySender(perm) returns (bytes memory) {
+    for (uint8 i = 0; i < cards.length;) {
+        euint8 color = RandomMock.getFakeRandomU8(); // Get a random color
+        euint8 value = RandomMock.getFakeRandomU8(); // Get a random value
+        euint8 card = FHE.or(
+            FHE.and(color, FHE.asEuint8(0x30)),
+            FHE.and(value, FHE.asEuint8(0xf))
+        );
+
+        // Sanity check: ensure value is below 13
+        card = FHE.select(
+            FHE.lt(FHE.and(card, FHE.asEuint8(0xf)), FHE.asEuint8(13)),
+            card,
+            FHE.asEuint8(0xff)
+        );
+
+        // Check if card exists, else "continue"
+        for (uint8 j = 0; j < i; j++) {
+            card = FHE.select(FHE.eq(cards[j], card), card, FHE.asEuint8(0xff));
+        }
+
+        cards[i] = card; // Assign the card
+        euint8 e_i = FHE.select(
+            FHE.ne(card, FHE.asEuint8(0xff)),
+            FHE.asEuint8(i + 1),
+            FHE.asEuint8(i)
+        );
+        i = FHE.decrypt(e_i); // Decrypt the index
+
+        if (i >= (players.length * 2 + 5)) break; // Break if all cards are assigned
+    }
+}
+
+// Function to reveal the player's own cards
+function revealOwnCards(Permission calldata perm) public view onlySender(perm) returns (bytes memory) {
     require(isPlayer(msg.sender), "You are not in the game");
     require(cards.length > 0, "No cards to reveal");
 
@@ -415,71 +439,58 @@ function bet(uint256 amount) public {
     require(index < (cards.length - 5) / 2, "Player not assigned cards");
 
     euint16 ret = FHE.or(
-      FHE.asEuint16(cards[2 * index]),
-      FHE.shl(FHE.asEuint16(cards[2 * (index + 1)]), FHE.asEuint16(8))
+        FHE.asEuint16(cards[2 * index]),
+        FHE.shl(FHE.asEuint16(cards[2 * (index + 1)]), FHE.asEuint16(8))
     );
     return FHE.sealoutput(ret, perm.publicKey);
-    // check which cards are assigned
-    // return permissioned player cards
-  }
+}
 
-    function distributePot(address[] memory winners) internal {
-    // distribute pot to winners
+// Function to distribute the pot to the winners
+function distributePot(address[] memory winners) internal {
     for (uint8 i = 0; i < winners.length; i++) {
-      currentStack[winners[i]] += pot / winners.length;
-      emit PotDistributed(winners[i], potShare);
+        currentStack[winners[i]] += pot / winners.length;
+        emit PotDistributed(winners[i], potShare);
     }
     pot = 0;
     endRound();
-  }
+}
 
-  function revealOnTable(uint8 start, uint8 end) private {
+// Function to reveal cards on the table within a specified range
+function revealOnTable(uint8 start, uint8 end) private {
     require(cards.length > 0, "No cards to reveal");
     require(start < end, "Invalid range");
     require(end <= tableCards.length, "Invalid range");
 
     uint256 tableCardIndex = players.length * 2;
     for (uint8 i = start; i < end; i++) {
-      uint8 tmp = FHE.decrypt(cards[tableCardIndex + i]);
-      tableCards[tableCardIndex + i] = tmp;
-      tableCardsRevealed[tableCardIndex + i] = true;
+        uint8 tmp = FHE.decrypt(cards[tableCardIndex + i]);
+        tableCards[tableCardIndex + i] = tmp;
+        tableCardsRevealed[tableCardIndex + i] = true;
     }
-  }
+}
 
-  // this function implements our poker ruleset
-  // call after all cards are revealed
-  // possible hands:
-  // - high card
-  // - pair
-  // - two pair
-  // - three of a kind
-  // - flush
-  // - four of a kind
-  // TODO: implement high card winner
-  function determineWinners() internal returns (address[] memory) {
+function determineWinners() internal returns (address[] memory) {
+    // Ensure that cards have been distributed
     require(cards.length > 0, "No cards have been distributed");
+    // Ensure that there are table cards to reveal
     require(tableCards.length > 0, "No table cards to reveal");
 
-    // check hands of all players and track highest hand(s)
-    // if multiple players have the same hand, check the highest card
-    // if multiple players have the same hand and highest card, split the pot
-    // if no players have a hand, split the pot
+    // Reveal each player's cards if they are still playing
     for (uint8 i = 0; i < players.length; i++) {
-
-      if (!stillPlaying[players[i]]) continue;
+        if (!stillPlaying[players[i]]) continue;
         uint256 playerCardIndex = playerCards[players[i]];
         tableCards[2 * i] = FHE.decrypt(cards[playerCardIndex]);
         tableCards[2 * i + 1] = FHE.decrypt(cards[playerCardIndex + 1]);
         tableCardsRevealed[2 * i] = true;
         tableCardsRevealed[2 * i + 1] = true;
-        }
+    }
 
-
-   uint8 highestHand = 0;
+    uint8 highestHand = 0;
     address[] memory highestHandPlayers = new address[](0);
     uint256 highestHandCount = 0;
 
-  for (uint8 i = 0; i < players.length; i++) {
+    // Determine the highest hand among the players
+    for (uint8 i = 0; i < players.length; i++) {
         if (!stillPlaying[players[i]]) continue;
         uint8 hand = determineHand(i);
         if (hand > highestHand) {
@@ -492,13 +503,12 @@ function bet(uint256 amount) public {
             highestHandCount++;
         }
     }
-
-   // Lógica de desempate
+    // Tie-breaking logic
     if (highestHandCount > 1) {
         highestHandPlayers = breakTies(highestHandPlayers);
     }
 
-    // Distribución del bote
+    // Pot distribution
     uint256[] memory potentialWinnings = new uint256[](players.length);
     for (uint256 i = 0; i < players.length; i++) {
         address player = players[i];
@@ -507,7 +517,7 @@ function bet(uint256 amount) public {
         }
     }
 
-    // Distribuir el bote considerando all-ins
+    // Distribute the pot considering all-ins
     uint256 remainingPot = pot;
     for (uint256 i = 0; i < highestHandPlayers.length; i++) {
         address player = highestHandPlayers[i];
@@ -527,24 +537,25 @@ function breakTies(address[] memory players) internal view returns (address[] me
     uint8 handType = determineHand(uint8(players[0]));
 
     if (handType == 9 || handType == 8 || handType == 5) {
-        // Escalera Real, Escalera de Color y Color se desempatan por la carta más alta
+        // Royal Flush, Straight Flush, and Flush are broken by the highest card
         return compareHighCards(players, handType);
     } else if (handType == 7 || handType == 4) {
-        // Póker y Escalera se desempatan por la carta más alta
+        // Four of a Kind and Straight are broken by the highest card
         return compareHighCards(players, handType);
     } else if (handType == 6) {
-        // Full House se desempata por el trío, luego por la pareja
+        // Full House is broken by the three of a kind, then by the pair
         return compareFullHouses(players);
     } else if (handType == 3 || handType == 2 || handType == 1) {
-        // Trío, Doble Pareja y Pareja se desempatan por la carta más alta
+        // Three of a Kind, Two Pair, and Pair are broken by the highest card
         return compareHighCards(players, handType);
     } else {
-        // Carta Alta se desempata por la carta más alta
+        // High Card is broken by the highest card
         return compareHighCards(players, handType);
     }
 }
 
 function compareHighCards(address[] memory players, uint8 handType) internal view returns (address[] memory) {
+    // Array to store the highest card for each player
     uint8[] memory highestCard = new uint8[](players.length);
 
     for (uint256 i = 0; i < players.length; i++) {
@@ -555,7 +566,8 @@ function compareHighCards(address[] memory players, uint8 handType) internal vie
         for (uint8 j = 0; j < 5; j++) {
             cards[j + 2] = tableCards[2 * players.length + j];
         }
-        
+
+        // Determine the highest card for the current player
         uint8 maxCard = 0;
         for (uint8 k = 0; k < 7; k++) {
             uint8 value = getValue(cards[k]);
@@ -566,6 +578,7 @@ function compareHighCards(address[] memory players, uint8 handType) internal vie
         highestCard[i] = maxCard;
     }
 
+    // Find the maximum card value among all players
     uint8 maxCard = 0;
     for (uint256 i = 0; i < players.length; i++) {
         if (highestCard[i] > maxCard) {
@@ -573,6 +586,7 @@ function compareHighCards(address[] memory players, uint8 handType) internal vie
         }
     }
 
+    // Collect all players who have the highest card
     address[] memory winners = new address[](0);
     for (uint256 i = 0; i < players.length; i++) {
         if (highestCard[i] == maxCard) {
@@ -584,6 +598,7 @@ function compareHighCards(address[] memory players, uint8 handType) internal vie
 }
 
 function compareFullHouses(address[] memory players) internal view returns (address[] memory) {
+    // Arrays to store the values of the three of a kind and the pair for each player
     uint8[] memory threeOfAKindValue = new uint8[](players.length);
     uint8[] memory pairValue = new uint8[](players.length);
 
@@ -595,15 +610,16 @@ function compareFullHouses(address[] memory players) internal view returns (addr
         for (uint8 j = 0; j < 5; j++) {
             cards[j + 2] = tableCards[2 * players.length + j];
         }
-        
+
+        // Count the occurrences of each card value
         uint8[] memory values = new uint8[](13);
         for (uint8 k = 0; k < 13; k++) values[k] = 0;
-        
         for (uint8 k = 0; k < 7; k++) {
             uint8 value = getValue(cards[k]);
             values[value]++;
         }
-        
+
+        // Determine the three of a kind and the pair for the current player
         uint8 threeOfAKind = 0;
         uint8 pair = 0;
         for (uint8 k = 0; k < 13; k++) {
@@ -613,22 +629,24 @@ function compareFullHouses(address[] memory players) internal view returns (addr
                 pair = k;
             }
         }
-        
+
         threeOfAKindValue[i] = threeOfAKind;
         pairValue[i] = pair;
     }
 
+    // Find the maximum values of the three of a kind and the pair among all players
     uint8 maxThreeOfAKindValue = 0;
     uint8 maxPairValue = 0;
     for (uint256 i = 0; i < players.length; i++) {
         if (threeOfAKindValue[i] > maxThreeOfAKindValue) {
-                     maxThreeOfAKindValue = threeOfAKindValue[i];
+            maxThreeOfAKindValue = threeOfAKindValue[i];
             maxPairValue = pairValue[i];
         } else if (threeOfAKindValue[i] == maxThreeOfAKindValue && pairValue[i] > maxPairValue) {
             maxPairValue = pairValue[i];
         }
     }
 
+    // Collect all players who have the highest three of a kind and pair
     address[] memory winners = new address[](0);
     for (uint256 i = 0; i < players.length; i++) {
         if (threeOfAKindValue[i] == maxThreeOfAKindValue && pairValue[i] == maxPairValue) {
@@ -639,8 +657,8 @@ function compareFullHouses(address[] memory players) internal view returns (addr
     return winners;
 }
 
-
 function determineHand(uint8 player) internal view returns (uint8) {
+    // Determine the hand ranking for the player
     // high card 0, pair 1, two pair 2, three of a kind 3, straight 4, flush 5, full house 6, four of a kind 7, straight flush 8, royal flush 9
     if (hasRoyalFlush(player)) return 9;
     else if (hasStraightFlush(player)) return 8;
@@ -654,7 +672,8 @@ function determineHand(uint8 player) internal view returns (uint8) {
     return 0;
 }
 
-  function hasStraight(uint8 player) internal view returns (bool) {
+function hasStraight(uint8 player) internal view returns (bool) {
+    // Check if the player has a straight
     uint8[] memory values = new uint8[](13);
     for (uint8 i = 0; i < 13; i++) values[i] = 0;
 
@@ -680,7 +699,7 @@ function determineHand(uint8 player) internal view returns (uint8) {
         }
     }
 
-    // Verificar el caso especial de A-2-3-4-5
+    // Check the special case of A-2-3-4-5
     if (values[0] > 0 && values[1] > 0 && values[2] > 0 && values[3] > 0 && values[12] > 0) {
         return true;
     }
@@ -688,7 +707,8 @@ function determineHand(uint8 player) internal view returns (uint8) {
     return false;
 }
 
-  function hasFullHouse(uint8 player) internal view returns (bool) {
+function hasFullHouse(uint8 player) internal view returns (bool) {
+    // Check if the player has a full house
     uint8[] memory values = new uint8[](13);
     for (uint8 i = 0; i < 13; i++) values[i] = 0;
 
@@ -716,6 +736,7 @@ function determineHand(uint8 player) internal view returns (uint8) {
 }
 
 function hasStraightFlush(uint8 player) internal view returns (bool) {
+    // Check if the player has a straight flush
     uint8[] memory colors = new uint8[](4);
     for (uint8 i = 0; i < 4; i++) colors[i] = 0;
 
@@ -753,7 +774,7 @@ function hasStraightFlush(uint8 player) internal view returns (bool) {
                 }
             }
 
-            // Verificar el caso especial de A-2-3-4-5
+            // Check the special case of A-2-3-4-5
             if (values[0] > 0 && values[1] > 0 && values[2] > 0 && values[3] > 0 && values[12] > 0) {
                 return true;
             }
@@ -764,9 +785,11 @@ function hasStraightFlush(uint8 player) internal view returns (bool) {
 }
 
 function hasRoyalFlush(uint8 player) internal view returns (bool) {
+    // Initialize an array to count the number of cards of each color
     uint8[] memory colors = new uint8[](4);
     for (uint8 i = 0; i < 4; i++) colors[i] = 0;
 
+    // Collect the relevant cards for the player
     uint8[] memory relevantCards = new uint8[](7);
     relevantCards[0] = tableCards[2 * player];
     relevantCards[1] = tableCards[2 * player + 1];
@@ -774,16 +797,20 @@ function hasRoyalFlush(uint8 player) internal view returns (bool) {
         relevantCards[i + 2] = tableCards[2 * players.length + i];
     }
 
+    // Count the number of cards of each color
     for (uint8 i = 0; i < 7; i++) {
         uint8 color = getColor(relevantCards[i]);
         colors[color]++;
     }
 
+    // Check for a royal flush in each color
     for (uint8 i = 0; i < 4; i++) {
         if (colors[i] > 4) {
+            // Initialize an array to count the number of cards of each value
             uint8[] memory values = new uint8[](13);
             for (uint8 j = 0; j < 13; j++) values[j] = 0;
 
+            // Count the number of cards of each value for the current color
             for (uint8 j = 0; j < 7; j++) {
                 if (getColor(relevantCards[j]) == i) {
                     uint8 value = getValue(relevantCards[j]);
@@ -791,6 +818,7 @@ function hasRoyalFlush(uint8 player) internal view returns (bool) {
                 }
             }
 
+            // Check for the presence of 10, J, Q, K, A
             if (values[10] > 0 && values[11] > 0 && values[12] > 0 && values[0] > 0 && values[9] > 0) {
                 return true;
             }
@@ -800,109 +828,123 @@ function hasRoyalFlush(uint8 player) internal view returns (bool) {
     return false;
 }
 
-  // check if player has multiple of a kind, return multiplicity
-  function hasMultipleOfAKind(uint8 player) internal view returns (uint8) {
+// Check if player has multiple of a kind, return multiplicity
+function hasMultipleOfAKind(uint8 player) internal view returns (uint8) {
+    // Initialize an array to count the number of cards of each value
     uint8[] memory values = new uint8[](13);
     for (uint8 i = 0; i < 13; i++) values[i] = 0;
 
-    // only check revealed cards
+    // Collect the relevant cards for the player
     uint8[] memory relevantCards = new uint8[](7);
     relevantCards[0] = tableCards[2 * player];
     relevantCards[1] = tableCards[2 * player + 1];
     for (uint8 i = 0; i < 5; i++) {
-      relevantCards[i + 2] = tableCards[2 * players.length + i];
+        relevantCards[i + 2] = tableCards[2 * players.length + i];
     }
 
+    // Count the number of cards of each value
     for (uint8 i = 0; i < 7; i++) {
-      uint8 value = getValue(relevantCards[i]);
-      values[value]++;
+        uint8 value = getValue(relevantCards[i]);
+        values[value]++;
     }
 
-    // find highest of a kind
+    // Find the highest multiplicity of a kind
     uint8 highest = 0;
     for (uint8 i = 0; i < 13; i++) {
-      if (values[i] > highest) highest = values[i];
+        if (values[i] > highest) highest = values[i];
     }
 
     return highest;
-  }
+}
 
-  // check if player has a flush
-  function hasFlush(uint8 player) internal view returns (bool) {
+// Check if player has a flush
+function hasFlush(uint8 player) internal view returns (bool) {
+    // Initialize an array to count the number of cards of each color
     uint8[] memory colors = new uint8[](4);
     for (uint8 i = 0; i < 4; i++) colors[i] = 0;
 
+    // Collect the relevant cards for the player
     uint8[] memory relevantCards = new uint8[](7);
     relevantCards[0] = tableCards[2 * player];
     relevantCards[1] = tableCards[2 * player + 1];
     for (uint8 i = 0; i < 5; i++) {
-      relevantCards[i + 2] = tableCards[2 * players.length + i];
+        relevantCards[i + 2] = tableCards[2 * players.length + i];
     }
 
+    // Count the number of cards of each color
     for (uint8 i = 0; i < 7; i++) {
-      uint8 color = getColor(relevantCards[i]);
-      colors[color]++;
+        uint8 color = getColor(relevantCards[i]);
+        colors[color]++;
     }
 
+    // Check if there are more than 3 cards of any color
     for (uint8 i = 0; i < 4; i++) {
-      if (colors[i] > 3) return true;
+        if (colors[i] > 3) return true;
     }
 
     return false;
-  }
+}
 
-  // check if player has a two-pair
-  function hasTwoPair(uint8 player) internal view returns (bool) {
+// Check if player has a two-pair
+function hasTwoPair(uint8 player) internal view returns (bool) {
+    // Initialize an array to count the number of cards of each value
     uint8[] memory values = new uint8[](13);
     for (uint8 i = 0; i < 13; i++) values[i] = 0;
 
+    // Collect the relevant cards for the player
     uint8[] memory relevantCards = new uint8[](7);
     relevantCards[0] = tableCards[2 * player];
     relevantCards[1] = tableCards[2 * player + 1];
     for (uint8 i = 0; i < 5; i++) {
-      relevantCards[i + 2] = tableCards[2 * players.length + i];
+        relevantCards[i + 2] = tableCards[2 * players.length + i];
     }
 
+    // Count the number of cards of each value
     for (uint8 i = 0; i < 7; i++) {
-      uint8 value = getValue(relevantCards[i]);
-      values[value]++;
+        uint8 value = getValue(relevantCards[i]);
+        values[value]++;
     }
 
+    // Count the number of pairs
     uint8 pairs = 0;
     for (uint8 i = 0; i < 13; i++) {
-      if (values[i] > 1) pairs++;
+        if (values[i] > 1) pairs++;
     }
 
     return pairs > 1;
-  }
+}
 
-  function getColor(uint8 card) internal pure returns (uint8) {
+function getColor(uint8 card) internal pure returns (uint8) {
+    // Extract the color from the card
     return card & 0x30;
-  }
+}
 
-  function getValue(uint8 card) internal pure returns (uint8) {
+function getValue(uint8 card) internal pure returns (uint8) {
+    // Extract the value from the card
     return card & 0xf;
-  }
+}
 
-  function isPlayer(address player) public view returns (bool) {
+function isPlayer(address player) public view returns (bool) {
+    // Check if the address is a player
     for (uint8 i = 0; i < players.length; i++) {
-      if (players[i] == player) {
-        return true;
-      }
+        if (players[i] == player) {
+            return true;
+        }
     }
     return false;
-  }
+}
 
-  function playerIndex(address player) public view returns (uint8) {
+function playerIndex(address player) public view returns (uint8) {
+    // Get the index of the player
     for (uint8 i = 0; i < players.length; i++) {
-      if (players[i] == player) {
-        return i;
-      }
+        if (players[i] == player) {
+            return i;
+        }
     }
     return 0xff;
-  }
+}
 
-  function gameState()
+function gameState()
     external
     view
     returns (
@@ -916,7 +958,8 @@ function hasRoyalFlush(uint8 player) internal view returns (bool) {
       bool[] memory cardsRevealed,
       address[] memory playerAddresses
     )
-  {
+{
+    // Return the current game state
     return (
       players.length,
       currentStack[msg.sender],
@@ -928,11 +971,11 @@ function hasRoyalFlush(uint8 player) internal view returns (bool) {
       tableCardsRevealed,
       players
     );
-  }
 }
 
 library RandomMock {
   function getFakeRandom() internal view returns (uint256) {
+    // Generate a fake random number based on the block hash
     uint blockNumber = block.number;
     uint256 blockHash = uint256(blockhash(blockNumber));
 
@@ -940,6 +983,7 @@ library RandomMock {
   }
 
   function getFakeRandomU8() internal view returns (euint8) {
+    // Generate a fake random uint8 number
     uint8 blockHash = uint8(getFakeRandom());
     return FHE.asEuint8(blockHash);
   }
